@@ -32,6 +32,11 @@ def die(msg):
 	sys.stderr.flush()
 	sys.exit(1)
 
+def parseint(s):
+	if s.lower().startswith("0x"):
+		return int(s, 16)
+	return int(s, 10)
+
 def ishex(s):
 	for c in s:
 		if c not in "0123456789abcdefABCDEF":
@@ -123,8 +128,6 @@ class IncFile(object):
 		if not m:
 			return
 		name, addr = m.group(1), m.group(2)
-		if addr.startswith("0x"):
-			addr = addr[2:]
 		try:
 			addr = int(addr, 16)
 		except ValueError:
@@ -147,8 +150,6 @@ class IncFile(object):
 			return
 		if not name.endswith("addr"):
 			return
-		if addr.startswith("0x"):
-			addr = addr[2:]
 		try:
 			addr = int(addr, 16)
 		except ValueError:
@@ -179,13 +180,19 @@ class Insn(object):
 		s = insn_string.split()
 		if len(s) < 2:
 			raise Insn.StringErr()
-		# Remove opcodes
+		# Extract the raw bytes
+		self.raw_bytes = []
 		while len(s[1]) == 2 and ishex(s[1]):
-			s.pop(1)
+			hexval = s.pop(1)
+			try:
+				hexval = int(hexval, 16)
+			except ValueError:
+				die("Failed to parse raw byte")
+			self.raw_bytes.append(hexval)
 		# Extract offset (2ab:)
 		try:
 			off = s[0]
-			off = "0x" + off[:-1]
+			off = off[:-1] # Strip colon
 			self.offset = int(off, 16)
 			self.offset_label = None
 		except TypeError:
@@ -206,7 +213,33 @@ class Insn(object):
 		self.callers = []
 		self.jmpsources = []
 
-	def get_full_string(self, inc_file):
+	def __makeLabel(self):
+		lbl = self.get_offset_string() + ":"
+		lbl = pad_to_length(lbl, 10)
+		return lbl
+
+	def get_as_data_string(self, inc_file):
+		'''Returns the full string of the instruction as data.'''
+
+		max_vect = inc_file.irq_vectors_size - 2
+
+		s = ""
+
+		# Space between IRQ vectors and program
+		if self.get_offset() == max_vect + 2:
+			s += "\n"
+
+		# Dump the bytes
+		s += self.__makeLabel()
+		if len(self.raw_bytes) == 2:
+			s += ".dw 0x%02X%02X" % (self.raw_bytes[1],\
+						 self.raw_bytes[0])
+		else:
+			die("Do not know how to handle raw bytes")
+
+		return s
+
+	def get_as_instruction_string(self, inc_file):
 		'''Returns a full string of the instruction'''
 
 		max_vect = inc_file.irq_vectors_size - 2
@@ -246,8 +279,7 @@ class Insn(object):
 			s += "\n"
 
 		# Dump the instruction string
-		s += self.get_offset_string() + ":"
-		s = pad_to_length(s, 10)
+		s += self.__makeLabel()
 		s += self.get_insn()
 		if self.get_operands():
 			s = pad_to_length(s, 18)
@@ -409,17 +441,21 @@ def usage():
 	print("Processed assembly is written to stdout.")
 	print("")
 	print("Options:")
-	print(" -s|--start OFFSET   Start offset. Default 0.")
-	print(" -e|--end OFFSET     End offset. Default all.")
+	print(" -s|--start OFFSET        Start offset. Default 0.")
+	print(" -e|--end OFFSET          End offset. Default all.")
+	print(" -d|--data-ranges RANGES  Define pure data ranges in program memory.")
+	print("                Example: -d 0x0-0x1F,0x100-0x1FF")
+	print("                Defines byte range 0h-1Fh and 100h-1FFh as data.")
 
 def main():
 	start_offset = 0
 	stop_offset = -1
+	data_ranges = []
 
 	try:
 		(opts, args) = getopt.getopt(sys.argv[1:],
-			"hs:e:",
-			[ "help", "start=", "end=", ])
+			"hs:e:d:",
+			[ "help", "start=", "end=", "data-ranges=", ])
 	except getopt.GetoptError as e:
 		usage()
 		return 1
@@ -431,12 +467,25 @@ def main():
 			try:
 				start_offset = int(v)
 			except ValueError as e:
-				die("--start is not a number")
+				die("-s|--start is not a number")
 		if o in ("-e", "--end"):
 			try:
 				stop_offset = int(v)
 			except ValueError as e:
-				die("--end is not a number")
+				die("-e|--end is not a number")
+		if o in ("-d", "--data-ranges"):
+			if not v.strip():
+				continue
+			try:
+				for rnge in v.split(','):
+					start, stop = rnge.split('-')
+					start, stop = parseint(start), parseint(stop)
+					if start < 0 or stop < 0 or stop < start:
+						raise ValueError
+					r = range(start, stop + 1)
+					data_ranges.append(r)
+			except ValueError as e:
+				die("-d|--data-ranges invalid value")
 	if len(args) != 1:
 		die("INC-FILE not specified")
 
@@ -516,12 +565,19 @@ def main():
 	sys.stdout.write('.org 0x000\n')
 	sys.stdout.write('\n')
 	for insn in insns:
-		s = insn.get_full_string(inc_file)
-		if not s:
-			continue
-		sys.stdout.write(s)
+		if any((insn.get_offset() in r) for r in data_ranges):
+			# Dump it as data.
+			s = insn.get_as_data_string(inc_file)
+			if not s:
+				continue
+			sys.stdout.write(s)
+		else:
+			# Dump the instruction.
+			s = insn.get_as_instruction_string(inc_file)
+			if not s:
+				continue
+			sys.stdout.write(s)
 		sys.stdout.write("\n")
-
 	return 0
 
 if __name__ == "__main__":
