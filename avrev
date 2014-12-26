@@ -1,0 +1,190 @@
+#!/bin/sh
+#
+#  avrev - AVR reverse engineering helper
+#
+#  Copyright (C) 2014 Michael Buesch <m@bues.ch>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+
+die()
+{
+	echo "$*" >&2
+	exit 1
+}
+
+# $1=program_name
+have_program()
+{
+	which "$1" >/dev/null 2>&1
+}
+
+# $1=program_name, ($2=description)
+assert_program()
+{
+	local bin="$1"
+	local desc="$2"
+
+	[ -n "$desc" ] || local desc="$bin"
+	have_program "$bin" || die "'$bin' not found. Please install $desc."
+}
+
+# $1=file_to_checksum
+csum()
+{
+	local file="$1"
+
+	sha1sum -b "$file" | cut -d' ' -f1 ||\
+		die "Checksum failed"
+}
+
+# $@=files_to_delete
+rm_temps()
+{
+	if [ $opt_save_temps -eq 0 ]; then
+		rm "$@" || die "Failed to remove temps: $*"
+	fi
+}
+
+usage()
+{
+	echo "Usage: avrev [OPTIONS] INFILE"
+	echo
+	echo "INFILE: The input file to disassemble and analyse."
+	echo "        This may be a binary or ihex file (see --intype)."
+	echo
+	echo "Options:"
+	echo " -I|--intype TYPE      Input file type (default: binary)"
+	echo " -m|--machine MACHINE  Input file architecture (default: avr4)"
+	echo " -c|--chip CHIP        Input file chip type (default: m88)"
+	echo
+	echo " -t|--save-temps       Do not delete temporary files"
+	echo " -i|--incdir INCDIR    Directory containing .inc files."
+	echo "                       (default: /usr/share/avra)"
+}
+
+setup_program_env()
+{
+	export PATH=".:$PATH"
+	assert_program sha1sum
+	assert_program avr-objdump
+	assert_program avr-objcopy
+	assert_program avra
+	assert_program avrasmpost
+}
+
+parse_args()
+{
+	opt_opt_input_filetype="binary"
+	opt_machine="avr4"
+	opt_chip="m88"
+	opt_save_temps=0
+	opt_incdir="/usr/share/avra"
+
+	end=0
+	while [ $# -gt 0 -a $end -eq 0 ]; do
+		case "$1" in
+		-h|--help)
+			usage
+			exit 0
+			;;
+		-I|--intype)
+			shift
+			opt_opt_input_filetype="$1"
+			;;
+		-m|--machine)
+			shift
+			opt_machine="$1"
+			;;
+		-c|--chip)
+			shift
+			opt_chip="$1"
+			;;
+		-t|--save-temps|-save-temps)
+			opt_save_temps=1
+			;;
+		-i|--incdir)
+			shift
+			opt_incdir="$1"
+			;;
+		*)
+			end=1
+			break
+			;;
+		esac
+		[ $end -eq 0 ] && shift
+	done
+	[ $# -eq 1 ] || {
+		usage
+		exit 1
+	}
+	opt_input_file="$1"
+
+	[ -r "$opt_input_file" ] ||\
+		die "Could not read input file '$opt_input_file'"
+	[ -d "$opt_incdir" ] ||\
+		die "Could not access INCDIR '$opt_incdir'"
+}
+
+run()
+{
+	local dasm_file="${opt_input_file}.raw.asm"
+	local postproc_file="${opt_input_file}.asm"
+	local avra_hex="${opt_input_file}.hex"
+	local avra_eep_hex="${opt_input_file}.eep.hex"
+	local avra_obj="${opt_input_file}.obj"
+	local avra_cof="${opt_input_file}.cof"
+	local reasm_bin_file="${opt_input_file}.reassembled"
+
+	echo "Disassembling '$opt_input_file'..."
+	avr-objdump -m "$opt_machine"\
+		--full-contents\
+		--target="$opt_opt_input_filetype"\
+		--disassemble-all\
+		"$opt_input_file" > "$dasm_file" ||\
+		die "avr-objdump failed"
+
+	echo "Postprocessing assembly..."
+	cat "$dasm_file" |\
+	avrasmpost "${opt_incdir}/${opt_chip}def.inc" > "$postproc_file" ||\
+		die "avr-postproc failed"
+	rm_temps "$dasm_file"
+
+	echo "Re-assembling..."
+	avra -I "$opt_incdir" "$postproc_file" >/dev/null ||\
+		die "avra failed"
+	rm_temps "$avra_cof" "$avra_obj" "$avra_eep_hex"
+	avr-objcopy -I ihex -O "$opt_opt_input_filetype"\
+		"$avra_hex" "$reasm_bin_file" ||\
+		die "avr-objcopy failed"
+	rm_temps "$avra_hex"
+
+	echo "Comparing..."
+	opt_input_file_sum="$(csum "$opt_input_file")"
+	echo "${opt_input_file}:              ${opt_input_file_sum}"
+	reasm_bin_file_sum="$(csum "$reasm_bin_file")"
+	echo "${reasm_bin_file}:  ${reasm_bin_file_sum}"
+	if [ "x$opt_input_file_sum" = "x$reasm_bin_file_sum" ]; then
+		echo "Ok"
+	else
+		die "ERROR: Checksum MISMATCH"
+	fi
+	rm_temps "$reasm_bin_file"
+}
+
+setup_program_env
+parse_args "$@"
+run
+exit 0

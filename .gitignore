@@ -1,0 +1,7 @@
+.*.swp
+*.bin
+*.asm
+*.hex
+*.cof
+*.obj
+*.reassembled
