@@ -58,6 +58,78 @@ rm_temps()
 	fi
 }
 
+# Allocate an array variable
+# $1=array_variable_name
+array_alloc()
+{
+	local var="$1"
+
+	eval __${var}_LEN=0
+}
+
+# Get array length
+# $1=array_variable_name
+array_length()
+{
+	local var="$1"
+
+	eval local length=\"\$__${var}_LEN\"
+	printf '%s' "$length"
+}
+
+# Get an array element
+# $1=array_variable_name, $2=index
+array_elem_get()
+{
+	local var="$1"
+	local index="$2"
+
+	eval local value=\"\$${var}_${index}\"
+	printf '%s' "$value"
+}
+
+# Set an array element
+# $1=array_variable_name, $2=index, $3=value
+array_elem_set()
+{
+	local var="$1"
+	local index="$2"
+	local value="$3"
+
+	[ "$index" -ge "$(array_length "$var")" ] &&\
+		eval __${var}_LEN=$(expr $index + 1) # Extend length
+	eval ${var}_${index}=\"\$value\"
+}
+
+# Append an element to an array
+# $1=array_variable_name, $2=value_to_append
+array_append()
+{
+	local var="$1"
+	local value="$2"
+
+	array_elem_set "$var" "$(array_length "$var")" "$value"
+}
+
+# Collapse an array to a single string
+# $1=array_variable_name, [$2=element_prefix], [$3=element_suffix],
+# [$4=element_separator]
+array_collapse()
+{
+	local var="$1"
+	[ $# -ge 2 ] && local pfx="$2" || local pfx=''
+	[ $# -ge 3 ] && local sfx="$3" || local sfx=''
+	[ $# -ge 4 ] && local sep="$4" || local sep=' '
+
+	local length="$(array_length "$var")"
+	local i=0
+	while [ $i -lt "$length" ]; do
+		[ $i -eq 0 ] || printf '%s' "$sep"
+		printf '%s%s%s' "$pfx" "$(array_elem_get "$var" "$i")" "$sfx"
+		local i=$(expr $i + 1)
+	done
+}
+
 usage()
 {
 	echo "Usage: avrev [OPTIONS] INFILE"
@@ -70,9 +142,11 @@ usage()
 	echo " -m|--machine MACHINE     Input file architecture (default: avr4)"
 	echo " -c|--chip CHIP           Input file chip type (default: m88)"
 	echo
-	echo " -d|--data-ranges RANGES  Define pure data ranges in program memory."
-	echo "                Example: -d 0x0-0x1F,0x100-0x1FF"
+	echo " -d|--data-range RANGE    Define a pure data range in program memory."
+	echo "                Example: -d 0x0-0x1F -d 0x100-0x1FF"
 	echo "                Defines byte range 0h-1Fh and 100h-1FFh as data."
+	echo " -L|--label-file FILE     Label file to pick label names from."
+	echo " -C|--comment-file FILE   Comment file to pick comments from."
 	echo
 	echo " -t|--save-temps          Do not delete temporary files"
 	echo " -i|--incdir INCDIR       Directory containing .inc files."
@@ -94,7 +168,9 @@ parse_args()
 	opt_opt_input_filetype="binary"
 	opt_machine="avr4"
 	opt_chip="m88"
-	opt_data_ranges=
+	array_alloc opt_data_ranges
+	array_alloc opt_label_files
+	array_alloc opt_comment_files
 	opt_save_temps=0
 	opt_incdir="/usr/share/avra"
 
@@ -117,9 +193,17 @@ parse_args()
 			shift
 			opt_chip="$1"
 			;;
-		-d|--data-ranges)
+		-d|--data-range)
 			shift
-			opt_data_ranges="$1"
+			array_append opt_data_ranges "$1"
+			;;
+		-L|--label)
+			shift
+			array_append opt_label_files "$1"
+			;;
+		-C|--comment)
+			shift
+			array_append opt_comment_files "$1"
 			;;
 		-t|--save-temps|-save-temps)
 			opt_save_temps=1
@@ -166,9 +250,13 @@ run()
 		die "avr-objdump failed"
 
 	echo "Postprocessing assembly..."
-	cat "$dasm_file" |\
-	avrasmpost -d "$opt_data_ranges"\
-		"${opt_incdir}/${opt_chip}def.inc" > "$postproc_file" ||\
+	local ranges="$(array_collapse opt_data_ranges "--data-range ")"
+	local labels="$(array_collapse opt_label_files "--label-file ")"
+	local comments="$(array_collapse opt_comment_files "--comment-file ")"
+	avrasmpost -I "$dasm_file"\
+		-O "$postproc_file"\
+		$ranges $labels $comments \
+		"${opt_incdir}/${opt_chip}def.inc" ||\
 		die "avr-postproc failed"
 	rm_temps "$dasm_file"
 

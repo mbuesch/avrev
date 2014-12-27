@@ -441,21 +441,33 @@ def usage():
 	print("Processed assembly is written to stdout.")
 	print("")
 	print("Options:")
-	print(" -s|--start OFFSET        Start offset. Default 0.")
+	print(" -I|--infile FILEPATH     Path to input file.")
+	print("                          If not specified, stdin is used.")
+	print(" -O|--outfile FILEPATH    Path to output file.")
+	print("                          If not specified, stdout is used.")
+	print(" -s|--start OFFSET        Start offset. Default 0x0.")
 	print(" -e|--end OFFSET          End offset. Default all.")
-	print(" -d|--data-ranges RANGES  Define pure data ranges in program memory.")
-	print("                Example: -d 0x0-0x1F,0x100-0x1FF")
+	print(" -d|--data-range RANGES   Define a pure data range in program memory.")
+	print("                Example: -d 0x0-0x1F -d 0x100-0x1FF")
 	print("                Defines byte range 0h-1Fh and 100h-1FFh as data.")
+	print(" -L|--label-file FILE     Label file to pick label names from.")
+	print(" -C|--comment-file FILE   Comment file to pick comments from.")
 
 def main():
+	infilename = None
+	outfilename = None
 	start_offset = 0
 	stop_offset = -1
 	data_ranges = []
+	label_files = []
+	comment_files = []
 
 	try:
 		(opts, args) = getopt.getopt(sys.argv[1:],
-			"hs:e:d:",
-			[ "help", "start=", "end=", "data-ranges=", ])
+			"hI:O:s:e:d:L:C:",
+			[ "help", "infile=", "outfile=",
+			  "start=", "end=", "data-range=",
+			  "label=", "comment=", ])
 	except getopt.GetoptError as e:
 		usage()
 		return 1
@@ -463,36 +475,54 @@ def main():
 		if o in ("-h", "--help"):
 			usage()
 			return 0
+		if o in ("-I", "--infile"):
+			infilename = v
+		if o in ("-O", "--outfile"):
+			outfilename = v
 		if o in ("-s", "--start"):
 			try:
-				start_offset = int(v)
+				start_offset = parseint(v)
 			except ValueError as e:
 				die("-s|--start is not a number")
 		if o in ("-e", "--end"):
 			try:
-				stop_offset = int(v)
+				stop_offset = parseint(v)
 			except ValueError as e:
 				die("-e|--end is not a number")
 		if o in ("-d", "--data-ranges"):
 			if not v.strip():
 				continue
 			try:
-				for rnge in v.split(','):
-					start, stop = rnge.split('-')
-					start, stop = parseint(start), parseint(stop)
-					if start < 0 or stop < 0 or stop < start:
-						raise ValueError
-					r = range(start, stop + 1)
-					data_ranges.append(r)
+				start, stop = v.split('-')
+				start, stop = parseint(start), parseint(stop)
+				if start < 0 or stop < 0 or stop < start:
+					raise ValueError
+				r = range(start, stop + 1)
+				data_ranges.append(r)
 			except ValueError as e:
-				die("-d|--data-ranges invalid value")
+				die("-d|--data-range invalid value")
+		if o in ("-L", "--label"):
+			label_files.append(v)
+			#TODO use it
+		if o in ("-C", "--comment"):
+			comment_files.append(v)
+			#TODO use it
 	if len(args) != 1:
 		die("INC-FILE not specified")
 
 	inc_file_path = args[0]
 	inc_file = IncFile(inc_file_path)
 
-	lines = sys.stdin.readlines()
+	if infilename:
+		try:
+			infd = open(infilename, "r")
+			lines = infd.readlines()
+			infd.close()
+		except IOError as e:
+			die("Failed to read input file '%s':\n%s" %\
+			    (infilename, str(e)))
+	else:
+		lines = sys.stdin.readlines()
 	insns = []
 	funcs = []
 
@@ -560,24 +590,34 @@ def main():
 				target.add_caller(insn)
 
 	# Write the output
-	sys.stdout.write('.include "' + inc_file_path.split("/")[-1] + '"\n')
-	sys.stdout.write('\n')
-	sys.stdout.write('.org 0x000\n')
-	sys.stdout.write('\n')
+	if outfilename:
+		try:
+			outfd = open(outfilename, "w")
+		except IOError as e:
+			die("Failed to open output file '%s':\n%s" %\
+			    (outfilename, str(e)))
+	else:
+		outfd = sys.stdout
+	outfd.write('.include "' + inc_file_path.split("/")[-1] + '"\n')
+	outfd.write('\n')
+	outfd.write('.org 0x000\n')
+	outfd.write('\n')
 	for insn in insns:
 		if any((insn.get_offset() in r) for r in data_ranges):
 			# Dump it as data.
 			s = insn.get_as_data_string(inc_file)
 			if not s:
 				continue
-			sys.stdout.write(s)
+			outfd.write(s)
 		else:
 			# Dump the instruction.
 			s = insn.get_as_instruction_string(inc_file)
 			if not s:
 				continue
-			sys.stdout.write(s)
-		sys.stdout.write("\n")
+			outfd.write(s)
+		outfd.write("\n")
+	if outfilename:
+		outfd.close()
 	return 0
 
 if __name__ == "__main__":
