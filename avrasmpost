@@ -489,7 +489,7 @@ def main():
 				stop_offset = parseint(v)
 			except ValueError as e:
 				die("-e|--end is not a number")
-		if o in ("-d", "--data-ranges"):
+		if o in ("-d", "--data-range"):
 			if not v.strip():
 				continue
 			try:
